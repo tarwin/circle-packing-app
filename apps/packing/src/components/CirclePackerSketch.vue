@@ -20,7 +20,9 @@ const shapePacks: Record<string, ShapeDefinition[]> = {
 
 // Config
 const debug = false
-const debugLines = true
+const debugLines = false
+// can be used by itself, doesn't need debug to be turned on
+const debugPoints = false
 const doRemoveOfTestBranch = true
 
 const onlyUseSomeShapes = true
@@ -197,7 +199,6 @@ async function run() {
   status.value = 'Generating points...'
   await new Promise(r => setTimeout(r, 0)) // yield to UI
 
-  console.log('Generating poisson points...')
   const poisson = new PoissonDiskSampling({
     shape: [artWidth, artHeight],
     minDistance: MIN_SCALE / 2,
@@ -209,15 +210,14 @@ async function run() {
     .map((p: number[], idx: number) => ({ x: p[0]!, y: p[1]!, r: 1, id: idx }))
     .sort(() => random() > 0.5 ? 1 : -1)
 
-  console.log(`Generated ${points.length} points`)
-
-  console.log('Adding points to poissonPacker...')
+  console.log(`Generated ${points.length} poisson points`)
   points.forEach(p => poissonPacker.addCircle(p))
-  console.log('Done adding points')
 
   let pointsNotUsed = [...points]
   let pointCounter = 0
   const pointUseTried: Record<number, number> = {}
+  const pointsTried: Point[] = []
+  const pointsUsed: Point[] = []
 
   const MIN_Q_SCALE = Math.sqrt(2) * MIN_SCALE
   const MAX_Q_SCALE = Math.sqrt(2) * MAX_SCALE
@@ -225,6 +225,7 @@ async function run() {
   const images: PlacedImage[] = []
   const circles: (Circle & { col?: string })[] = []
   let numItemsAdded = 0
+  let timeSpendRemoving = 0
 
   status.value = 'Packing shapes...'
   await new Promise(r => setTimeout(r, 0)) // yield to UI
@@ -246,6 +247,7 @@ async function run() {
 
     if (!pointUseTried[p.id]) {
       pointUseTried[p.id] = 1
+      pointsTried.push(p)
     } else {
       pointUseTried[p.id] = pointUseTried[p.id]! + 1
       if (pointUseTried[p.id]! > NUM_POINT_TRIES) {
@@ -325,12 +327,15 @@ async function run() {
         images.push(lastAddedImage)
 
         if (doRemoveOfTestBranch) {
+          const ss = Date.now()
           lastAdded.forEach(c => poissonPacker.removeCircles(c.x, c.y, c.r + PACKER_PADDING))
           if (random() > 0.95) {
             pointsNotUsed = poissonPacker.getItems() as Point[]
           }
+          timeSpendRemoving += Date.now() - ss
         }
 
+        pointsUsed.push(p)
         numItemsAdded++
         break
       } else if (added) {
@@ -348,11 +353,11 @@ async function run() {
     }
   }
 
-  console.log(`Packing time: ${(Date.now() - startTime) / 1000}s`)
-  console.log(`Items added: ${numItemsAdded}`)
+  const packingTime = Date.now() - startTime
 
   // Draw
   status.value = 'Drawing...'
+  const drawStartTime = Date.now()
   const m = renderMultiplier
 
   if (debug) {
@@ -381,7 +386,57 @@ async function run() {
     }
   }
 
-  status.value = `Done! ${numItemsAdded} items placed`
+  if (debugPoints) {
+    // points that still exist to try
+    ctx.strokeStyle = 'red'
+    ctx.lineWidth = 1
+    for (const c of poissonPacker.getItems()) {
+      ctx.beginPath()
+      ctx.arc(c.x * m, c.y * m, c.r * m, 0, Math.PI * 2)
+      ctx.stroke()
+    }
+
+    // those that were tested
+    ctx.strokeStyle = 'green'
+    for (const c of pointsTried) {
+      ctx.beginPath()
+      ctx.arc(c.x * m, c.y * m, c.r * m, 0, Math.PI * 2)
+      ctx.stroke()
+    }
+
+    // ones that were actually placed
+    ctx.strokeStyle = 'blue'
+    for (const c of pointsUsed) {
+      ctx.beginPath()
+      ctx.arc(c.x * m, c.y * m, 5 * m, 0, Math.PI * 2)
+      ctx.stroke()
+    }
+
+    // used too much, ignored
+    ctx.strokeStyle = 'orange'
+    ctx.fillStyle = 'orange'
+    const pointsUsedTooMuchIds = Object.entries(pointUseTried)
+      .filter(([_, v]) => v > NUM_POINT_TRIES)
+      .map(([id]) => parseInt(id))
+    const pointsUsedTooMuchC = pointsTried.filter(c => pointsUsedTooMuchIds.includes(c.id))
+
+    for (const c of pointsUsedTooMuchC) {
+      ctx.beginPath()
+      ctx.arc(c.x * m, c.y * m, 5 * m, 0, Math.PI * 2)
+      ctx.fill()
+    }
+
+    console.log(`Used too much: ${pointsUsedTooMuchC.length}`)
+  }
+
+  const drawTime = Date.now() - drawStartTime
+
+  // status.value = `Done! ${numItemsAdded} items placed`
+  console.log(`Items added: ${numItemsAdded}`)
+  console.log(`Packing time: ${packingTime / 1000}s`)
+  console.log(`Time Spent Removing: ${timeSpendRemoving / 1000}s`)
+  console.log(`Draw time: ${drawTime / 1000}s`)
+  console.log(`Total time: ${(Date.now() - startTime) / 1000}s`)
 }
 
 onMounted(() => {
