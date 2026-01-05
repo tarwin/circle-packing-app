@@ -25,9 +25,18 @@ export class CirclePacker {
   private gridSizeY: number
   private grid: GridTile[][] = []
   private _itemsDirty: boolean = false
+  private wrapX: boolean
+  private wrapY: boolean
   items: Circle[] = []
 
-  constructor(width: number, height: number, numGrid: number = 15, padding: number = 1) {
+  constructor(
+    width: number,
+    height: number,
+    numGrid: number = 15,
+    padding: number = 1,
+    wrapX: boolean = false,
+    wrapY: boolean = false
+  ) {
     this.width = width
     this.height = height
     this.numGrid = numGrid
@@ -35,6 +44,8 @@ export class CirclePacker {
     this.paddingSq = padding * padding
     this.gridSizeX = this.width / this.numGrid
     this.gridSizeY = this.height / this.numGrid
+    this.wrapX = wrapX
+    this.wrapY = wrapY
 
     this.generateGrid()
   }
@@ -51,16 +62,32 @@ export class CirclePacker {
   }
 
   private getGridTilesAround(x: number, y: number, r: number): GridTile[] {
-    // Pre-clamp bounds to avoid checks inside loop
-    const minI = Math.max(0, Math.floor((x - r - this.padding) / this.gridSizeX))
-    const minJ = Math.max(0, Math.floor((y - r - this.padding) / this.gridSizeY))
-    const maxI = Math.min(this.numGrid - 1, Math.floor((x + r + this.padding) / this.gridSizeX))
-    const maxJ = Math.min(this.numGrid - 1, Math.floor((y + r + this.padding) / this.gridSizeY))
-
     const tiles: GridTile[] = []
+
+    const minI = Math.floor((x - r - this.padding) / this.gridSizeX)
+    const minJ = Math.floor((y - r - this.padding) / this.gridSizeY)
+    const maxI = Math.floor((x + r + this.padding) / this.gridSizeX)
+    const maxJ = Math.floor((y + r + this.padding) / this.gridSizeY)
+
     for (let i = minI; i <= maxI; i++) {
       for (let j = minJ; j <= maxJ; j++) {
-        tiles.push(this.grid[i]![j]!)
+        let wi = i, wj = j
+
+        // Wrap or clamp X
+        if (this.wrapX) {
+          wi = ((i % this.numGrid) + this.numGrid) % this.numGrid
+        } else if (i < 0 || i >= this.numGrid) {
+          continue
+        }
+
+        // Wrap or clamp Y
+        if (this.wrapY) {
+          wj = ((j % this.numGrid) + this.numGrid) % this.numGrid
+        } else if (j < 0 || j >= this.numGrid) {
+          continue
+        }
+
+        tiles.push(this.grid[wi]![wj]!)
       }
     }
     return tiles
@@ -93,14 +120,28 @@ export class CirclePacker {
     return dx * dx + dy * dy
   }
 
+  // Squared distance accounting for per-axis wrapping
+  private wrappedDistSq(x1: number, y1: number, x2: number, y2: number): number {
+    let dx = Math.abs(x1 - x2)
+    let dy = Math.abs(y1 - y2)
+    if (this.wrapX && dx > this.width / 2) dx = this.width - dx
+    if (this.wrapY && dy > this.height / 2) dy = this.height - dy
+    return dx * dx + dy * dy
+  }
+
   // Check if two circles collide (with padding)
   private collides(c1x: number, c1y: number, c1r: number, c2: Circle): boolean {
     const combinedR = c1r + c2.r + this.padding
-    return this.distSq(c1x, c1y, c2.x, c2.y) < combinedR * combinedR
+    const distSq = (this.wrapX || this.wrapY)
+      ? this.wrappedDistSq(c1x, c1y, c2.x, c2.y)
+      : this.distSq(c1x, c1y, c2.x, c2.y)
+    return distSq < combinedR * combinedR
   }
 
   private isOutOfBounds(x: number, y: number, r: number): boolean {
-    return x - r < 0 || x + r > this.width || y - r < 0 || y + r > this.height
+    const outX = this.wrapX ? false : (x - r < 0 || x + r > this.width)
+    const outY = this.wrapY ? false : (y - r < 0 || y + r > this.height)
+    return outX || outY
   }
 
   addCircle(c: Circle): Circle | null {
@@ -158,7 +199,19 @@ export class CirclePacker {
     let hi = maxRadius
 
     // Clamp hi to bounds (floor to ensure integer comparison works)
-    hi = Math.floor(Math.min(hi, x, this.width - x, y, this.height - y))
+    // For wrapped axes, clamp to half the dimension (max sensible radius in toroidal space)
+    // For non-wrapped axes, clamp to distance from edges
+    if (this.wrapX) {
+      hi = Math.min(hi, this.width / 2)
+    } else {
+      hi = Math.min(hi, x, this.width - x)
+    }
+    if (this.wrapY) {
+      hi = Math.min(hi, this.height / 2)
+    } else {
+      hi = Math.min(hi, y, this.height - y)
+    }
+    hi = Math.floor(hi)
     lo = Math.floor(lo)
 
     if (hi < lo) {
@@ -235,7 +288,9 @@ export class CirclePacker {
       for (let i = 0; i < tileCircles.length; i++) {
         const c = tileCircles[i]!
         const combinedR = radius + c.r + this.padding
-        const distSq = this.distSq(x, y, c.x, c.y)
+        const distSq = (this.wrapX || this.wrapY)
+          ? this.wrappedDistSq(x, y, c.x, c.y)
+          : this.distSq(x, y, c.x, c.y)
 
         if (distSq > combinedR * combinedR) {
           toKeep.push(c)

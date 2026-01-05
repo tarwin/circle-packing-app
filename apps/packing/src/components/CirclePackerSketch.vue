@@ -31,6 +31,14 @@ const maxSomeShapes = 3
 
 const useSinglePack = false
 
+// Wrap-around (toroidal) settings
+const wrapX = true
+const wrapY = true
+
+// Custom size (set to 0 to use window size)
+const customWidth = 400
+const customHeight = 400
+
 const rotateUsingChoices: RotateMode[] = ['screen-x', 'screen-y', 'random', 'noise', 'screen-c', 'angle-from-center', '']
 const maxUsingChoices: MaxSizeMode[] = ['screen-x', 'screen-y', 'random', 'noise', 'distance-from-center', '']
 
@@ -130,13 +138,16 @@ async function run() {
   const canvas = canvasRef.value
   if (!canvas) return
 
-  const artWidth = Math.ceil(window.innerWidth)
-  const artHeight = Math.ceil(window.innerHeight)
+  const artWidth = customWidth || Math.ceil(window.innerWidth)
+  const artHeight = customHeight || Math.ceil(window.innerHeight)
 
   canvas.width = artWidth * renderMultiplier
   canvas.height = artHeight * renderMultiplier
-  canvas.style.width = `${artWidth}px`
-  canvas.style.height = `${artHeight}px`
+  // Only set CSS size if using window dimensions (for responsive display)
+  if (!customWidth && !customHeight) {
+    canvas.style.width = `${artWidth}px`
+    canvas.style.height = `${artHeight}px`
+  }
 
   const ctx = canvas.getContext('2d')
   if (!ctx) return
@@ -186,13 +197,17 @@ async function run() {
     artWidth,
     artHeight,
     Math.round(Math.max(artWidth, artHeight) / 1600 * 200),
-    PACKER_PADDING
+    PACKER_PADDING,
+    wrapX,
+    wrapY
   )
   const poissonPacker = new CirclePacker(
     artWidth,
     artHeight,
     Math.round(Math.max(artWidth, artHeight) / 1600 * 100),
-    1
+    1,
+    wrapX,
+    wrapY
   )
 
   // Generate poisson points
@@ -231,7 +246,6 @@ async function run() {
   await new Promise(r => setTimeout(r, 0)) // yield to UI
 
   const startTime = Date.now()
-  console.log('Starting packing loop...')
 
   for (let i = 0; i < NUM_ITEM_PLACE_TRIES; i++) {
     // Yield every 50 iterations to prevent UI blocking
@@ -259,13 +273,14 @@ async function run() {
     const y = p.y
 
     // Quick test for min scale
-    let qtScale = MIN_Q_SCALE
-    const quickAdd = packer.tryToAddCircle(x, y, MIN_Q_SCALE, MAX_Q_SCALE, false)
-    if (quickAdd) {
-      qtScale = quickAdd.r
-    }
+    // let qtScale = MIN_Q_SCALE
+    // const quickAdd = packer.tryToAddCircle(x, y, MIN_Q_SCALE, MAX_Q_SCALE, false)
+    // if (quickAdd) {
+    //   qtScale = quickAdd.r
+    // }
 
-    let currentScale = Math.max(MIN_SCALE, qtScale)
+    let currentScale = MIN_SCALE
+    // let currentScale = Math.max(MIN_SCALE, qtScale)
 
     // Calculate rotation
     let rotateRadians = random() * Math.PI * 2
@@ -337,6 +352,7 @@ async function run() {
 
         pointsUsed.push(p)
         numItemsAdded++
+        lastAdded = null  // Mark as added
         break
       } else if (added) {
         lastAdded = [...added]
@@ -351,9 +367,59 @@ async function run() {
       }
       currentScale += SCALE_INCREMENT
     }
+
+    // If we exited the loop with a pending shape (succeeded all the way to max), add it
+    if (lastAdded && lastAddedImage) {
+      lastAdded.forEach(c => {
+        const circleWithCol = c as Circle & { col?: string }
+        circleWithCol.col = currentShape.col
+        circles.push(circleWithCol)
+        packer.addCircle(c)
+      })
+      images.push(lastAddedImage)
+
+      if (doRemoveOfTestBranch) {
+        const ss = Date.now()
+        lastAdded.forEach(c => poissonPacker.removeCircles(c.x, c.y, c.r + PACKER_PADDING))
+        if (random() > 0.95) {
+          pointsNotUsed = poissonPacker.getItems() as Point[]
+        }
+        timeSpendRemoving += Date.now() - ss
+      }
+
+      pointsUsed.push(p)
+      numItemsAdded++
+    }
   }
 
   const packingTime = Date.now() - startTime
+
+  // Helper to get wrapped positions for rendering
+  function getWrappedPositions(x: number, y: number, size: number): [number, number][] {
+    const positions: [number, number][] = [[x, y]]
+
+    // X-axis wrapping
+    if (wrapX) {
+      if (x - size < 0) positions.push([x + artWidth, y])
+      if (x + size > artWidth) positions.push([x - artWidth, y])
+    }
+
+    // Y-axis wrapping
+    if (wrapY) {
+      if (y - size < 0) positions.push([x, y + artHeight])
+      if (y + size > artHeight) positions.push([x, y - artHeight])
+    }
+
+    // Corners (only if both axes wrap and near both edges)
+    if (wrapX && wrapY) {
+      if (x - size < 0 && y - size < 0) positions.push([x + artWidth, y + artHeight])
+      if (x + size > artWidth && y - size < 0) positions.push([x - artWidth, y + artHeight])
+      if (x - size < 0 && y + size > artHeight) positions.push([x + artWidth, y - artHeight])
+      if (x + size > artWidth && y + size > artHeight) positions.push([x - artWidth, y - artHeight])
+    }
+
+    return positions
+  }
 
   // Draw
   status.value = 'Drawing...'
@@ -363,26 +429,32 @@ async function run() {
   if (debug) {
     for (const c of packer.items) {
       const circleWithCol = c as Circle & { col?: string }
-      ctx.beginPath()
-      ctx.arc(c.x * m, c.y * m, c.r * m, 0, Math.PI * 2)
-      if (debugLines) {
-        ctx.strokeStyle = circleWithCol.col || 'white'
-        ctx.lineWidth = 1
-        ctx.stroke()
-      } else {
-        ctx.fillStyle = circleWithCol.col || 'white'
-        ctx.fill()
+      const positions = getWrappedPositions(c.x, c.y, c.r)
+      for (const [px, py] of positions) {
+        ctx.beginPath()
+        ctx.arc(px * m, py * m, c.r * m, 0, Math.PI * 2)
+        if (debugLines) {
+          ctx.strokeStyle = circleWithCol.col || 'white'
+          ctx.lineWidth = 1
+          ctx.stroke()
+        } else {
+          ctx.fillStyle = circleWithCol.col || 'white'
+          ctx.fill()
+        }
       }
     }
   } else {
     for (const img of images) {
       const imgScale = 1 / Math.max(img.image.width, img.image.height)
-      ctx.save()
-      ctx.translate(img.x * m, img.y * m)
-      ctx.rotate(img.rotation)
-      ctx.scale(img.scale * imgScale * m, img.scale * imgScale * m)
-      ctx.drawImage(img.image, -img.image.width / 2, -img.image.height / 2)
-      ctx.restore()
+      const positions = getWrappedPositions(img.x, img.y, img.scale)
+      for (const [px, py] of positions) {
+        ctx.save()
+        ctx.translate(px * m, py * m)
+        ctx.rotate(img.rotation)
+        ctx.scale(img.scale * imgScale * m, img.scale * imgScale * m)
+        ctx.drawImage(img.image, -img.image.width / 2, -img.image.height / 2)
+        ctx.restore()
+      }
     }
   }
 
